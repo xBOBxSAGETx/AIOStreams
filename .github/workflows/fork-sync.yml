@@ -163,21 +163,33 @@ jobs:
             exit 1
           fi
 
+      # resources/metadata.json is git-ignored and only this script creates it (fork-image.yml runs it
+      # before its build). Same call; the merge commit here is local, so its hash is not the one the push
+      # job will publish (same tree). Without the file core only logs "Error loading metadata.json".
+      - name: Generate metadata
+        if: steps.tag.outputs.current != 'true'
+        run: |
+          set -euo pipefail
+          node scripts/generateMetadata.cjs --channel=dev --ref="strand-$(git rev-parse --short=8 HEAD)" --commit="$(git rev-parse HEAD)"
+
       # Gate: every test file the fork adds or changes relative to upstream.
+      # The tag is passed as NIGHTLY_TAG, not TAG: core's env.ts declares TAG (with VERSION, CHANNEL,
+      # DESCRIPTION, GIT_COMMIT, BUILD_TIME, BUILD_COMMIT_TIME) as readonly, and a set TAG makes every
+      # test that imports it exit 1 with "TAG: Readonly environment variable, cannot be set" (run 36480685376).
       - name: Tests for the fork's own changes
         if: steps.tag.outputs.current != 'true'
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          NIGHTLY_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           FAILED=""
-          mapfile -t CORE < <(git diff --name-only --diff-filter=AM "${TAG}" HEAD -- 'packages/core/**/*.test.ts' | sed 's#^packages/core/##')
+          mapfile -t CORE < <(git diff --name-only --diff-filter=AM "${NIGHTLY_TAG}" HEAD -- 'packages/core/**/*.test.ts' | sed 's#^packages/core/##')
           if (( ${#CORE[@]} )); then
             echo "core: ${CORE[*]}"
             (cd packages/core && pnpm exec tsx --test --test-force-exit --import ./test/setup.ts "${CORE[@]}") || FAILED="${FAILED} core"
           fi
           for pkg in frontend server; do
-            mapfile -t FILES < <(git diff --name-only --diff-filter=AM "${TAG}" HEAD -- "packages/${pkg}/**/*.test.ts" "packages/${pkg}/**/*.test.tsx" | sed "s#^packages/${pkg}/##")
+            mapfile -t FILES < <(git diff --name-only --diff-filter=AM "${NIGHTLY_TAG}" HEAD -- "packages/${pkg}/**/*.test.ts" "packages/${pkg}/**/*.test.tsx" | sed "s#^packages/${pkg}/##")
             if (( ${#FILES[@]} )); then
               echo "${pkg}: ${FILES[*]}"
               (cd "packages/${pkg}" && pnpm exec vitest run "${FILES[@]}") || FAILED="${FAILED} ${pkg}"
