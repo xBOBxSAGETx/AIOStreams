@@ -1,0 +1,113 @@
+# Fork-only workflow (xBOBxSAGETx/AIOStreams, branch `strand`). Not for upstream.
+#
+# PR gate for `strand`: every pull request into `strand` must install, build and pass the fork's own
+# tests before it is merged, because a push to `strand` builds the `:strand` image (fork-image.yml)
+# that the VPS auto-update deploys at 3:00 AM Oregon.
+#
+# Same commands as the `check` job of fork-sync.yml (which are upstream build.yml's install + build,
+# plus the fork's own test files), run on the PR's merge commit.
+#
+# No secrets: read-only GITHUB_TOKEN, checkout with persist-credentials: false, upstream tags fetched
+# anonymously. No path filter, so the check always reports and can be made a required check.
+name: Fork PR checks
+
+on:
+  pull_request:
+    branches: [strand]
+
+concurrency:
+  group: fork-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_URL: https://github.com/Viren070/AIOStreams.git
+
+jobs:
+  check:
+    name: Install, build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The fork's own tests are the test files that differ from the newest upstream nightly this
+      # commit contains (same base fork-image.yml records as the image's upstream-nightly label).
+      - name: Find the upstream base
+        id: base
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet "${UPSTREAM_URL}" 'refs/tags/*-nightly:refs/tags/*-nightly'
+          # mapfile, not `| head`: under pipefail a long tag list kills sort with SIGPIPE (run 36480189466).
+          mapfile -t TAGS < <(git tag -l '[0-9]*-nightly' | sort -r)
+          BASE=""
+          for t in "${TAGS[@]}"; do
+            if git merge-base --is-ancestor "${t}" HEAD; then BASE="${t}"; break; fi
+          done
+          if [[ -z "${BASE}" ]]; then
+            echo "::error::No upstream nightly tag is contained in $(git rev-parse HEAD)."
+            exit 1
+          fi
+          echo "nightly=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "Upstream base: ${BASE}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # Upstream's own PR gate (build.yml): install + build (the build runs tsc for core and server).
+      - name: Install and build (upstream build.yml)
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      # resources/metadata.json is git-ignored and only this script creates it; without it core only
+      # logs "Error loading metadata.json". Same call as fork-sync.yml.
+      - name: Generate metadata
+        run: |
+          set -euo pipefail
+          node scripts/generateMetadata.cjs --channel=dev --ref="strand-$(git rev-parse --short=8 HEAD)" --commit="$(git rev-parse HEAD)"
+
+      # Gate: every test file the fork adds or changes relative to upstream (same step as fork-sync.yml).
+      # NIGHTLY_TAG, not TAG: core's env.ts declares TAG readonly (run 36480685376).
+      - name: Tests for the fork's own changes
+        env:
+          NIGHTLY_TAG: ${{ steps.base.outputs.nightly }}
+        run: |
+          set -euo pipefail
+          FAILED=""
+          RAN=0
+          mapfile -t CORE < <(git diff --name-only --diff-filter=AM "${NIGHTLY_TAG}" HEAD -- 'packages/core/**/*.test.ts' | sed 's#^packages/core/##')
+          if (( ${#CORE[@]} )); then
+            echo "core: ${CORE[*]}"
+            RAN=$((RAN + ${#CORE[@]}))
+            (cd packages/core && pnpm exec tsx --test --test-force-exit --import ./test/setup.ts "${CORE[@]}") || FAILED="${FAILED} core"
+          fi
+          for pkg in frontend server; do
+            mapfile -t FILES < <(git diff --name-only --diff-filter=AM "${NIGHTLY_TAG}" HEAD -- "packages/${pkg}/**/*.test.ts" "packages/${pkg}/**/*.test.tsx" | sed "s#^packages/${pkg}/##")
+            if (( ${#FILES[@]} )); then
+              echo "${pkg}: ${FILES[*]}"
+              RAN=$((RAN + ${#FILES[@]}))
+              (cd "packages/${pkg}" && pnpm exec vitest run "${FILES[@]}") || FAILED="${FAILED} ${pkg}"
+            fi
+          done
+          echo "Fork test files run: ${RAN}" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [[ -n "${FAILED}" ]]; then
+            echo "::error::The fork's own tests fail:${FAILED}."
+            exit 1
+          fi
+
+      # Advisory only, as in fork-sync.yml: upstream does not gate on its unit tests, and core has a
+      # known failing test upstream (remuxdb/adapter.test.ts "maps audio and subtitle tracks").
+      - name: Full core test suite (advisory)
+        continue-on-error: true
+        run: pnpm -F core test
