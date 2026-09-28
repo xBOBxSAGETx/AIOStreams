@@ -267,15 +267,19 @@ function applyUserFilters(req: Request, items: JellyfinItem[]): JellyfinItem[] {
 /**
  * The order a library listing is sorted into, or null for catalog order. Only
  * for configurations that turn sorting on, since most clients ask for SortName
- * by default and a catalog's own order (popular, trending) is usually the point.
+ * by default and a catalog's own order (popular, trending) is usually the point;
+ * for the same reason a plain name A→Z keeps catalog order unless turned off.
  */
 function librarySort(
   req: Request,
   ctx: JellyfinRequestContext
 ): LibrarySortTerm[] | null {
   if (appConfig.jellyfin.maxSortItems <= 0) return null;
-  if (!ctx.userData.jellyfin?.sortLibraries) return null;
-  return parseLibrarySort(qlist(req, 'SortBy'), qlist(req, 'SortOrder'));
+  const settings = ctx.userData.jellyfin;
+  if (!settings?.sortLibraries) return null;
+  return parseLibrarySort(qlist(req, 'SortBy'), qlist(req, 'SortOrder'), {
+    plainNameKeepsCatalogOrder: settings.plainNameKeepsCatalogOrder ?? true,
+  });
 }
 
 /* Without library sorting, catalog order stands; Random shuffles the page. */

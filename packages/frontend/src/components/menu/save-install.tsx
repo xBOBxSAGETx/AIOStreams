@@ -3005,7 +3005,7 @@ function Content() {
                       }
                       moreHelp={
                         jellyfinSortCap > 0
-                          ? "Off, every library keeps its catalog's own order, such as popular or trending, whatever your app asks for. Most apps ask for Name unless you pick something else, so turning this on makes libraries alphabetical by default. Random works either way."
+                          ? "Off, every library keeps its catalog's own order, such as popular or trending, whatever your app asks for. Random works either way."
                           : undefined
                       }
                       side="right"
@@ -3022,6 +3022,29 @@ function Content() {
                         }))
                       }
                     />
+                    {jellyfinSortCap > 0 &&
+                      (userData.jellyfin?.sortLibraries ?? false) && (
+                        <Switch
+                          label="Name A→Z keeps the catalog's own order"
+                          help="Most apps ask for name A→Z when you haven't picked a sort, so this keeps popular or trending libraries in their order until you choose one."
+                          moreHelp="A name A→Z you pick from the menu looks the same to the server, so it keeps the catalog's order too. Name Z→A and every other sort still apply. Turn this off to sort name A→Z alphabetically, which makes libraries alphabetical by default in most apps."
+                          side="right"
+                          value={
+                            userData.jellyfin?.plainNameKeepsCatalogOrder ??
+                            true
+                          }
+                          defaultValue={true}
+                          onValueChange={(value) =>
+                            setUserData((prev) => ({
+                              ...prev,
+                              jellyfin: {
+                                ...prev.jellyfin,
+                                plainNameKeepsCatalogOrder: value,
+                              },
+                            }))
+                          }
+                        />
+                      )}
                   </div>
                 ),
               },

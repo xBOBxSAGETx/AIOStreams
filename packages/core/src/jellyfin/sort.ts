@@ -43,14 +43,40 @@ function keyFor(value: string): LibrarySortKey | undefined {
  * answer. As Jellyfin pairs them, `SortOrder[i]` goes with `SortBy[i]` and keys
  * past the last order take the first one given, else ascending. Keys an entry
  * cannot answer (play state, folders, studios) are passed over; `Default`
- * ends the list, since catalog order already breaks every tie.
+ * ends the list, since catalog order already breaks every tie. With
+ * `plainNameKeepsCatalogOrder`, a plain name A→Z also keeps catalog order.
  */
-export function parseLibrarySort(
+export interface LibrarySortOptions {
+  /**
+   * Treat a plain name A→Z (`SortBy` of `SortName` or `Name` alone, ascending
+   * or with no `SortOrder`) as catalog order. Most apps send exactly that when
+   * the user has picked nothing, so honouring it would make every library
+   * alphabetical by default; the cost is that choosing "Name, A→Z" from a menu
+   * looks the same and keeps catalog order too.
+   */
+  plainNameKeepsCatalogOrder?: boolean;
+}
+
+/** `SortBy` of a name key alone, ascending: what most apps send by default. */
+export function isPlainNameSort(
   sortBy: string[],
   sortOrder: string[]
+): boolean {
+  if (sortBy.length !== 1) return false;
+  if (keyFor(sortBy[0]) !== 'sortname') return false;
+  const first = sortOrder[0]?.toLowerCase();
+  return !first || !first.startsWith('desc');
+}
+
+export function parseLibrarySort(
+  sortBy: string[],
+  sortOrder: string[],
+  options: LibrarySortOptions = {}
 ): LibrarySortTerm[] | null {
   const first = sortBy[0]?.toLowerCase();
   if (!first || first === 'random' || first === 'default') return null;
+  if (options.plainNameKeepsCatalogOrder && isPlainNameSort(sortBy, sortOrder))
+    return null;
   const orders = sortOrder.map((o) => o.toLowerCase().startsWith('desc'));
   const fallback = orders[0] ?? false;
   const terms: LibrarySortTerm[] = [];

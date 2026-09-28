@@ -8,7 +8,11 @@ import type { MetaPreview } from '../db/schemas.js';
 import type { AIOStreams } from '../main/index.js';
 import type { Catalog } from './dto.js';
 import { getCatalogPage } from './library.js';
-import { parseLibrarySort, sortCatalogEntries } from './sort.js';
+import {
+  isPlainNameSort,
+  parseLibrarySort,
+  sortCatalogEntries,
+} from './sort.js';
 
 function entry(
   id: string,
@@ -64,6 +68,70 @@ describe('parseLibrarySort', () => {
         []
       ),
       [{ key: 'productionyear', descending: false }]
+    );
+  });
+});
+
+describe('plain name A→Z keeps catalog order', () => {
+  const keep = { plainNameKeepsCatalogOrder: true };
+
+  it('recognises a name key alone, ascending or with no order', () => {
+    assert.equal(isPlainNameSort(['SortName'], ['Ascending']), true);
+    assert.equal(isPlainNameSort(['SortName'], []), true);
+    assert.equal(isPlainNameSort(['name'], ['ascending']), true);
+    assert.equal(isPlainNameSort(['SortName'], ['Descending']), false);
+    assert.equal(isPlainNameSort(['SortName', 'ProductionYear'], []), false);
+    assert.equal(isPlainNameSort(['PremiereDate'], []), false);
+  });
+
+  it('keeps catalog order for the default request when the option is on', () => {
+    assert.equal(parseLibrarySort(['SortName'], ['Ascending'], keep), null);
+    assert.equal(parseLibrarySort(['SortName'], [], keep), null);
+    assert.equal(parseLibrarySort(['Name'], ['Ascending'], keep), null);
+  });
+
+  it('still sorts name A→Z when the option is off', () => {
+    assert.deepEqual(
+      parseLibrarySort(['SortName'], ['Ascending'], {
+        plainNameKeepsCatalogOrder: false,
+      }),
+      [{ key: 'sortname', descending: false }]
+    );
+    assert.deepEqual(parseLibrarySort(['SortName'], ['Ascending']), [
+      { key: 'sortname', descending: false },
+    ]);
+  });
+
+  it('honours every other sort, as Strand sends them', () => {
+    assert.deepEqual(parseLibrarySort(['SortName'], ['Descending'], keep), [
+      { key: 'sortname', descending: true },
+    ]);
+    assert.deepEqual(
+      parseLibrarySort(
+        ['ProductionYear', 'PremiereDate', 'SortName'],
+        ['Descending'],
+        keep
+      ),
+      [
+        { key: 'productionyear', descending: true },
+        { key: 'premieredate', descending: true },
+        { key: 'sortname', descending: true },
+      ]
+    );
+    assert.deepEqual(
+      parseLibrarySort(['DateCreated', 'SortName'], ['Descending'], keep),
+      [
+        { key: 'datecreated', descending: true },
+        { key: 'sortname', descending: true },
+      ]
+    );
+    // A name sort with a second key is a choice, not the default.
+    assert.deepEqual(
+      parseLibrarySort(['SortName', 'ProductionYear'], ['Ascending'], keep),
+      [
+        { key: 'sortname', descending: false },
+        { key: 'productionyear', descending: false },
+      ]
     );
   });
 });

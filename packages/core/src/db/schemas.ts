@@ -174,6 +174,8 @@ const JellyfinSettingsFields = z.object({
   segmentTypes: z.array(z.enum(['Intro', 'Recap', 'Outro'])).optional(),
   /** Honour a client's SortBy/SortOrder on libraries. Default off: catalog order. */
   sortLibraries: z.boolean().optional(),
+  /** With sorting on, a plain name A→Z (most apps' default) keeps catalog order. Default on. */
+  plainNameKeepsCatalogOrder: z.boolean().optional(),
   /** The configuration's own user: the history its trackers sync with. */
   primary: z
     .object({
