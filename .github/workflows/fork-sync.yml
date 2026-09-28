@@ -1,0 +1,267 @@
+# Fork-only workflow (xBOBxSAGETx/AIOStreams, branch `strand`). Not for upstream.
+#
+# Daily: merge upstream's newest nightly tag into `strand`.
+#   clean merge + checks pass -> push `strand`, then build the image in this same run (fork-image.yml
+#                                via workflow_call)
+#   conflict / check fails    -> push NOTHING, open or update the "fork-sync: upstream merge blocked"
+#                                issue; the last good :strand image stays
+#
+# Upstream source: `:nightly` is built by upstream deploy-docker.yml from the `<date>-nightly` tag that
+# upstream nightly.yml creates on every qualifying push to `main`, so the tag (not `main`'s tip) is
+# exactly what the upstream `:nightly` image contains.
+#
+# Needs (see the PR that added this file):
+#   - `strand` as the repository's default branch (`schedule` and `workflow_dispatch` only run
+#     workflows that exist on the default branch)
+#   - Issues enabled (for the blocked-merge issue)
+#   - secret STRAND_SYNC_TOKEN (fine-grained PAT, this repo only, Contents RW + Workflows RW) for
+#     merges that change .github/workflows/**; without it those merges are reported, not pushed
+name: Fork sync
+
+on:
+  schedule:
+    # 01:17 UTC = 18:17 PDT. The VPS auto-update pulls at 05:00 Berlin (03:00 UTC summer /
+    # 04:00 UTC winter), so the image is ready the same morning. Off the hour: `schedule` runs are
+    # delayed most at the start of every hour.
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      nightly:
+        description: Upstream nightly tag to merge (empty = newest)
+        required: false
+        type: string
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_URL: https://github.com/Viren070/AIOStreams.git
+  MERGE_PREFIX: 'chore(fork-sync): merge upstream '
+  ISSUE_TITLE: 'fork-sync: upstream merge blocked'
+
+jobs:
+  sync:
+    name: Merge upstream nightly
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+      sha: ${{ steps.push.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: strand
+          fetch-depth: 0
+          # GITHUB_TOKEN cannot push a commit that changes .github/workflows/** (it has no
+          # `workflows` permission); the PAT can. Falls back to GITHUB_TOKEN when the secret is unset.
+          token: ${{ secrets.STRAND_SYNC_TOKEN || github.token }}
+
+      - name: Pick the upstream nightly
+        id: tag
+        env:
+          INPUT_NIGHTLY: ${{ inputs.nightly }}
+        run: |
+          set -euo pipefail
+          REASON="${RUNNER_TEMP}/reason.md"
+          # Read-only fetch of upstream's nightly tags; they are never pushed to the fork.
+          git fetch --no-tags --quiet "${UPSTREAM_URL}" 'refs/tags/*-nightly:refs/tags/*-nightly'
+          if [[ -n "${INPUT_NIGHTLY}" ]]; then
+            TAG="${INPUT_NIGHTLY}"
+          else
+            TAG=$(git tag -l '[0-9]*-nightly' | sort -r | head -n 1)
+          fi
+          if [[ -z "${TAG}" ]] || ! git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
+            echo "Upstream nightly tag \`${TAG:-<none>}\` not found." > "${REASON}"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "${TAG}" HEAD; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+            echo "strand already contains ${TAG}; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Merge the nightly into strand
+        if: steps.tag.outputs.current != 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          REASON="${RUNNER_TEMP}/reason.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git merge --no-ff --no-edit -m "${MERGE_PREFIX}${TAG}" "${TAG}"; then
+            {
+              echo "Upstream nightly \`${TAG}\` does not merge cleanly into \`strand\`."
+              echo
+              echo "Conflicted files:"
+              echo '```'
+              git diff --name-only --diff-filter=U
+              echo '```'
+            } > "${REASON}"
+            git merge --abort
+            exit 1
+          fi
+
+      - name: Refuse fork-only DB migrations
+        if: steps.tag.outputs.current != 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # After the merge, anything in the migrations dir that differs from the upstream tag exists
+          # only in the fork. Such a migration makes the DB unusable for upstream builds
+          # (migrations/runner.ts assertNotForeign / assertSchemaUpToDate) and blocks switching back.
+          DIFF=$(git diff --name-status "${TAG}" HEAD -- packages/core/src/db/migrations/)
+          if [[ -n "${DIFF}" ]]; then
+            {
+              echo "The merged tree has DB migration changes that upstream \`${TAG}\` does not have:"
+              echo '```'
+              echo "${DIFF}"
+              echo '```'
+              echo "The fork must not carry its own migrations (fork-run plan)."
+            } > "${RUNNER_TEMP}/reason.md"
+            exit 1
+          fi
+
+      - name: Check the push credential
+        if: steps.tag.outputs.current != 'true'
+        env:
+          HAS_PAT: ${{ secrets.STRAND_SYNC_TOKEN != '' }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          CHANGED=$(git diff --name-only HEAD^1 HEAD -- .github/workflows/)
+          if [[ -n "${CHANGED}" && "${HAS_PAT}" != "true" ]]; then
+            {
+              echo "Upstream \`${TAG}\` changes workflow files, which \`GITHUB_TOKEN\` may not push:"
+              echo '```'
+              echo "${CHANGED}"
+              echo '```'
+              echo "Add the \`STRAND_SYNC_TOKEN\` secret (fine-grained PAT: this repository only;"
+              echo "Contents read/write + Workflows read/write) and re-run **Fork sync**."
+            } > "${RUNNER_TEMP}/reason.md"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        if: steps.tag.outputs.current != 'true'
+        with:
+          node-version: 24
+
+      # Upstream's own PR gate (build.yml): install + build.
+      - name: Install and build (upstream build.yml)
+        if: steps.tag.outputs.current != 'true'
+        run: |
+          set -euo pipefail
+          corepack enable
+          if ! pnpm install --frozen-lockfile || ! pnpm run build; then
+            echo "The merged tree does not install/build (\`pnpm install --frozen-lockfile && pnpm run build\`). See the run log." \
+              > "${RUNNER_TEMP}/reason.md"
+            exit 1
+          fi
+
+      # Gate: every test file the fork adds or changes relative to upstream.
+      - name: Tests for the fork's own changes
+        if: steps.tag.outputs.current != 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          FAILED=""
+          mapfile -t CORE < <(git diff --name-only --diff-filter=AM "${TAG}" HEAD -- 'packages/core/**/*.test.ts' | sed 's#^packages/core/##')
+          if (( ${#CORE[@]} )); then
+            echo "core: ${CORE[*]}"
+            (cd packages/core && pnpm exec tsx --test --test-force-exit --import ./test/setup.ts "${CORE[@]}") || FAILED="${FAILED} core"
+          fi
+          for pkg in frontend server; do
+            mapfile -t FILES < <(git diff --name-only --diff-filter=AM "${TAG}" HEAD -- "packages/${pkg}/**/*.test.ts" "packages/${pkg}/**/*.test.tsx" | sed "s#^packages/${pkg}/##")
+            if (( ${#FILES[@]} )); then
+              echo "${pkg}: ${FILES[*]}"
+              (cd "packages/${pkg}" && pnpm exec vitest run "${FILES[@]}") || FAILED="${FAILED} ${pkg}"
+            fi
+          done
+          if [[ -n "${FAILED}" ]]; then
+            echo "The fork's own tests fail on the merged tree:${FAILED}. See the run log." > "${RUNNER_TEMP}/reason.md"
+            exit 1
+          fi
+
+      # Advisory only: upstream does not gate on its unit tests, and core has a known failing test
+      # upstream (remuxdb/adapter.test.ts "maps audio and subtitle tracks" at 1c6f2c0c).
+      - name: Full core test suite (advisory)
+        if: steps.tag.outputs.current != 'true'
+        continue-on-error: true
+        run: pnpm -F core test
+
+      - name: Push strand
+        id: push
+        if: steps.tag.outputs.current != 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git push origin HEAD:refs/heads/strand; then
+            echo "Pushing \`strand\` failed (did it move during the run, or is the token missing a permission?). See the run log." \
+              > "${RUNNER_TEMP}/reason.md"
+            exit 1
+          fi
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Merged ${TAG} into strand as $(git rev-parse --short=8 HEAD)." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Close the blocked-merge issue
+        if: steps.push.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          for n in $(gh issue list -R "${GITHUB_REPOSITORY}" -s open --search "in:title \"${ISSUE_TITLE}\"" --json number,title \
+                     --jq ".[] | select(.title == \"${ISSUE_TITLE}\") | .number"); do
+            gh issue close "${n}" -R "${GITHUB_REPOSITORY}" -c "Merged \`${TAG}\` cleanly; image build started in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+          done
+
+      - name: Open or update the blocked-merge issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          REASON="${RUNNER_TEMP}/reason.md"
+          [[ -s "${REASON}" ]] || echo "The sync failed before it could record a reason. See the run log." > "${REASON}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            cat "${REASON}"
+            echo
+            echo "Nothing was pushed or built; \`:strand\` still points at the last good image. Run: ${RUN_URL}"
+            echo
+            echo "To fix by hand: \`git fetch https://github.com/Viren070/AIOStreams.git tag ${TAG:-<tag>}\`,"
+            echo "\`git checkout strand && git merge ${TAG:-<tag>}\`, resolve, push \`strand\` (or open a PR into it)."
+            echo "A push to \`strand\` builds the image. Use a commit message that does not start with"
+            echo "\`${MERGE_PREFIX}\`, or run **Fork image** by hand afterwards."
+          } > "${RUNNER_TEMP}/body.md"
+          cat "${RUNNER_TEMP}/body.md" >> "$GITHUB_STEP_SUMMARY"
+          OPEN=$(gh issue list -R "${GITHUB_REPOSITORY}" -s open --search "in:title \"${ISSUE_TITLE}\"" --json number,title \
+                 --jq "[.[] | select(.title == \"${ISSUE_TITLE}\")][0].number // empty") || OPEN=""
+          if [[ -n "${OPEN}" ]]; then
+            gh issue comment "${OPEN}" -R "${GITHUB_REPOSITORY}" --body-file "${RUNNER_TEMP}/body.md" \
+              || echo "::warning::Could not comment on issue #${OPEN}."
+          else
+            gh issue create -R "${GITHUB_REPOSITORY}" -t "${ISSUE_TITLE}" --body-file "${RUNNER_TEMP}/body.md" \
+              || echo "::warning::Could not open an issue (are Issues enabled on the fork?)."
+          fi
+
+  image:
+    name: Build the image
+    needs: sync
+    if: needs.sync.outputs.pushed == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/fork-image.yml
+    with:
+      ref: ${{ needs.sync.outputs.sha }}
