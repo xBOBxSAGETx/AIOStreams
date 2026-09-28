@@ -29,10 +29,14 @@ name: Fork sync
 
 on:
   schedule:
-    # 01:17 UTC = 18:17 PDT. The VPS auto-update pulls at 05:00 Berlin (03:00 UTC summer /
-    # 04:00 UTC winter), so the image is ready the same morning. Off the hour: `schedule` runs are
-    # delayed most at the start of every hour.
-    - cron: '17 1 * * *'
+    # 08:17 UTC = 1:17 AM PDT / 12:17 AM PST. GitHub cron is UTC-only and Oregon shifts by 1 h at
+    # DST, so 08:xx UTC is the only hour inside the owner's 12-2 AM Oregon band all year. One hour
+    # after the Strand Discovery build (07:17 UTC). The VPS auto-update pulls at 12:00 Berlin
+    # (10:00 UTC summer / 11:00 UTC winter = 3:00 AM Oregon): >= 1 h 43 min after this start; a
+    # sync + image run takes ~6 min. A late run is harmless: the multi-arch tag is switched only by
+    # the final manifest step, so the pull gets yesterday's image and the new one the next day.
+    # Off the hour: `schedule` runs are delayed most at the start of every hour.
+    - cron: '17 8 * * *'
   workflow_dispatch:
     inputs:
       nightly:
