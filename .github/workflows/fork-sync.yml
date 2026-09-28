@@ -84,7 +84,10 @@ jobs:
           if [[ -n "${INPUT_NIGHTLY}" ]]; then
             TAG="${INPUT_NIGHTLY}"
           else
-            TAG=$(git tag -l '[0-9]*-nightly' | sort -r | head -n 1)
+            # No `| head` here: under pipefail, head exits after one line, sort then dies of SIGPIPE once the
+            # tag list exceeds the pipe buffer, and the step fails (run 36480189466). mapfile reads everything.
+            mapfile -t TAGS < <(git tag -l '[0-9]*-nightly' | sort -r)
+            TAG="${TAGS[0]:-}"
           fi
           if [[ -z "${TAG}" ]] || ! git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
             echo "Upstream nightly tag \`${TAG:-<none>}\` not found." > "${REASON}"
