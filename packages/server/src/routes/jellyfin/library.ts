@@ -24,8 +24,11 @@ import {
   latestSpellings,
   listResult,
   listViews,
+  parseLibrarySort,
   requiresGenre,
   searchCatalogs,
+  sortCatalogEntries,
+  type LibrarySortTerm,
   seriesIdOf,
   seriesKeyOf,
   supportsExtra,
@@ -261,7 +264,25 @@ function applyUserFilters(req: Request, items: JellyfinItem[]): JellyfinItem[] {
   return out;
 }
 
-/* Catalog order is the only order that means anything; Random is the one sort honoured. */
+/**
+ * The order a library listing is sorted into, or null for catalog order. Only
+ * for configurations that turn sorting on, since most clients ask for SortName
+ * by default and a catalog's own order (popular, trending) is usually the point;
+ * for the same reason a plain name A→Z keeps catalog order unless turned off.
+ */
+function librarySort(
+  req: Request,
+  ctx: JellyfinRequestContext
+): LibrarySortTerm[] | null {
+  if (appConfig.jellyfin.maxSortItems <= 0) return null;
+  const settings = ctx.userData.jellyfin;
+  if (!settings?.sortLibraries) return null;
+  return parseLibrarySort(qlist(req, 'SortBy'), qlist(req, 'SortOrder'), {
+    plainNameKeepsCatalogOrder: settings.plainNameKeepsCatalogOrder ?? true,
+  });
+}
+
+/* Without library sorting, catalog order stands; Random shuffles the page. */
 function applySort(req: Request, items: JellyfinItem[]): JellyfinItem[] {
   const sortBy = qlist(req, 'SortBy').map((s) => s.toLowerCase());
   if (sortBy[0] !== 'random') return items;
@@ -667,6 +688,28 @@ async function handleItems(
         items.length,
         startIndex
       );
+      return;
+    }
+    const sort = librarySort(req, ctx);
+    if (sort) {
+      // A sort needs the whole set: read it once (later pages come from the
+      // catalog cache), sort it, and page the sorted list.
+      const maxSort = appConfig.jellyfin.maxSortItems;
+      const all = await getCatalogPage(engine, catalog, {
+        startIndex: 0,
+        limit: maxSort,
+        maxRead: maxSort,
+        genre: genreFromId,
+        search: searchTerm,
+        select: pageFilter(req, ctx, types, { parentId, catalog }),
+      });
+      const sorted = sortCatalogEntries(all.items, sort);
+      const items = await itemsFromPreviews(
+        ctx,
+        sorted.slice(startIndex, startIndex + limit),
+        { parentId, catalog }
+      );
+      send(req, res, items, sorted.length, startIndex);
       return;
     }
     const page = await getCatalogPage(engine, catalog, {

@@ -73,6 +73,17 @@ export const jellyfinSchema = {
     secret: false,
     ui: { min: 0 },
   },
+  maxSortItems: {
+    schema: z.number().int().min(0),
+    default: 1000,
+    label: 'Max items sorted per library',
+    description:
+      'How many titles of one library are read to sort it, for configurations that turn on library sorting. A client that asks for an order such as name, release date or rating gets the whole library in that order, not one page at a time, so the first sorted page reads the catalog to this cap (never past **Max items per library**) and later pages come from the catalog cache. A bigger library is sorted over its first titles up to the cap, which is all it lists while sorted. 0 turns sorting off for every configuration.',
+    env: 'JELLYFIN_MAX_SORT_ITEMS',
+    requiresRestart: false,
+    secret: false,
+    ui: { min: 0 },
+  },
   maxLibraries: {
     schema: z.number().int().min(0),
     default: 20,
