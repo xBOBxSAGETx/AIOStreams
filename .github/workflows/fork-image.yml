@@ -43,6 +43,7 @@ jobs:
       ${{ github.event_name != 'push' ||
       !startsWith(github.event.head_commit.message, 'chore(fork-sync): merge upstream ') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -106,6 +107,7 @@ jobs:
             runner: ubuntu-24.04-arm
             suffix: arm64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,6 +170,7 @@ jobs:
     name: Merge manifests
     needs: [setup, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       packages: write
       contents: read

@@ -62,6 +62,7 @@ jobs:
   check:
     name: Merge and test (no write credentials)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     outputs:
@@ -225,6 +226,7 @@ jobs:
     needs: check
     if: needs.check.outputs.current != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       # Used only by the no-PAT fallback push (GITHUB_TOKEN). With STRAND_SYNC_TOKEN set it is unused.
       contents: write
@@ -305,11 +307,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Runs after the image build too (needs: image), so a failed or cancelled image build is reported
+  # like a blocked merge instead of the run looking fine at the report step.
   report:
     name: Report
-    needs: [check, push]
+    needs: [check, push, image]
     if: always() && (needs.check.result == 'failure' || needs.push.result == 'failure' || needs.push.outputs.pushed == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:
@@ -322,24 +327,38 @@ jobs:
           path: ${{ runner.temp }}/reason
 
       - name: Open or update the blocked-merge issue
-        if: needs.push.outputs.pushed != 'true'
+        if: needs.push.outputs.pushed != 'true' || needs.image.result != 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.check.outputs.tag }}
+          PUSHED: ${{ needs.push.outputs.pushed }}
+          SHA: ${{ needs.push.outputs.sha }}
+          IMAGE_RESULT: ${{ needs.image.result }}
         run: |
           REASON="${RUNNER_TEMP}/reason/reason.md"
-          [[ -s "${REASON}" ]] || { mkdir -p "$(dirname "${REASON}")"; echo "The sync failed before it could record a reason. See the run log." > "${REASON}"; }
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          {
-            cat "${REASON}"
-            echo
-            echo "Nothing was pushed or built; \`:strand\` still points at the last good image. Run: ${RUN_URL}"
-            echo
-            echo "To fix by hand: \`git fetch https://github.com/Viren070/AIOStreams.git tag ${TAG:-<tag>}\`,"
-            echo "\`git checkout strand && git merge ${TAG:-<tag>}\`, resolve, push \`strand\` (or open a PR into it)."
-            echo "A push to \`strand\` builds the image. Use a commit message that does not start with"
-            echo "\`${MERGE_PREFIX}\`, or run **Fork image** by hand afterwards."
-          } > "${RUNNER_TEMP}/body.md"
+          if [[ "${PUSHED}" == "true" ]]; then
+            {
+              echo "Upstream \`${TAG}\` merged cleanly and \`strand\` was pushed (\`${SHA}\`), but the image build"
+              echo "ended with **${IMAGE_RESULT:-unknown}**. Run: ${RUN_URL}"
+              echo
+              echo "\`:strand\` was not moved, so it still points at the last good image; \`strand\` is ahead of it."
+              echo "To fix: read the \"Build the image\" jobs of the run, then re-run the failed jobs or run"
+              echo "**Fork image** by hand on \`strand\`."
+            } > "${RUNNER_TEMP}/body.md"
+          else
+            [[ -s "${REASON}" ]] || { mkdir -p "$(dirname "${REASON}")"; echo "The sync failed before it could record a reason. See the run log." > "${REASON}"; }
+            {
+              cat "${REASON}"
+              echo
+              echo "Nothing was pushed or built; \`:strand\` still points at the last good image. Run: ${RUN_URL}"
+              echo
+              echo "To fix by hand: \`git fetch https://github.com/Viren070/AIOStreams.git tag ${TAG:-<tag>}\`,"
+              echo "\`git checkout strand && git merge ${TAG:-<tag>}\`, resolve, push \`strand\` (or open a PR into it)."
+              echo "A push to \`strand\` builds the image. Use a commit message that does not start with"
+              echo "\`${MERGE_PREFIX}\`, or run **Fork image** by hand afterwards."
+            } > "${RUNNER_TEMP}/body.md"
+          fi
           cat "${RUNNER_TEMP}/body.md" >> "$GITHUB_STEP_SUMMARY"
           OPEN=$(gh issue list -R "${GITHUB_REPOSITORY}" -s open --search "in:title \"${ISSUE_TITLE}\"" --json number,title \
                  --jq "[.[] | select(.title == \"${ISSUE_TITLE}\")][0].number // empty") || OPEN=""
@@ -352,16 +371,18 @@ jobs:
           fi
 
       - name: Close the blocked-merge issue
-        if: needs.push.outputs.pushed == 'true'
+        if: needs.push.outputs.pushed == 'true' && needs.image.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.check.outputs.tag }}
         run: |
           for n in $(gh issue list -R "${GITHUB_REPOSITORY}" -s open --search "in:title \"${ISSUE_TITLE}\"" --json number,title \
                      --jq ".[] | select(.title == \"${ISSUE_TITLE}\") | .number"); do
-            gh issue close "${n}" -R "${GITHUB_REPOSITORY}" -c "Merged \`${TAG}\` cleanly; image build started in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+            gh issue close "${n}" -R "${GITHUB_REPOSITORY}" -c "Merged \`${TAG}\` cleanly and built the image in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
           done
 
+  # No timeout-minutes here: a job that calls a reusable workflow may not set one; each job inside
+  # fork-image.yml has its own.
   image:
     name: Build the image
     needs: push
