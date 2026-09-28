@@ -10,6 +10,15 @@
 # upstream nightly.yml creates on every qualifying push to `main`, so the tag (not `main`'s tip) is
 # exactly what the upstream `:nightly` image contains.
 #
+# Credentials (why there are three jobs):
+#   check   runs upstream code (pnpm install scripts, build, tests). It has a read-only GITHUB_TOKEN,
+#           checks out with persist-credentials: false, fetches upstream anonymously and references
+#           no secret, so no write credential exists anywhere in that job.
+#   push    runs no upstream code. It re-does the same merge from the same base + tag, refuses unless
+#           the tree equals the one `check` tested, and gets the PAT only as an env var of the push
+#           step. Without the PAT it falls back to GITHUB_TOKEN (contents: write, this job only).
+#   report  issues: write only.
+#
 # Needs (see the PR that added this file):
 #   - `strand` as the repository's default branch (`schedule` and `workflow_dispatch` only run
 #     workflows that exist on the default branch)
@@ -42,25 +51,26 @@ env:
   UPSTREAM_URL: https://github.com/Viren070/AIOStreams.git
   MERGE_PREFIX: 'chore(fork-sync): merge upstream '
   ISSUE_TITLE: 'fork-sync: upstream merge blocked'
+  BOT_NAME: github-actions[bot]
+  BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
 
 jobs:
-  sync:
-    name: Merge upstream nightly
+  check:
+    name: Merge and test (no write credentials)
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      issues: write
+      contents: read
     outputs:
-      pushed: ${{ steps.push.outputs.pushed }}
-      sha: ${{ steps.push.outputs.sha }}
+      tag: ${{ steps.tag.outputs.tag }}
+      current: ${{ steps.tag.outputs.current }}
+      base: ${{ steps.tag.outputs.base }}
+      tree: ${{ steps.merge.outputs.tree }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: strand
           fetch-depth: 0
-          # GITHUB_TOKEN cannot push a commit that changes .github/workflows/** (it has no
-          # `workflows` permission); the PAT can. Falls back to GITHUB_TOKEN when the secret is unset.
-          token: ${{ secrets.STRAND_SYNC_TOKEN || github.token }}
+          persist-credentials: false
 
       - name: Pick the upstream nightly
         id: tag
@@ -69,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           REASON="${RUNNER_TEMP}/reason.md"
-          # Read-only fetch of upstream's nightly tags; they are never pushed to the fork.
+          # Anonymous, read-only fetch of upstream's nightly tags; they are never pushed to the fork.
           git fetch --no-tags --quiet "${UPSTREAM_URL}" 'refs/tags/*-nightly:refs/tags/*-nightly'
           if [[ -n "${INPUT_NIGHTLY}" ]]; then
             TAG="${INPUT_NIGHTLY}"
@@ -81,20 +91,22 @@ jobs:
             exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if git merge-base --is-ancestor "${TAG}" HEAD; then
             echo "current=true" >> "$GITHUB_OUTPUT"
             echo "strand already contains ${TAG}; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Merge the nightly into strand
+      - name: Merge the nightly into strand (local only)
+        id: merge
         if: steps.tag.outputs.current != 'true'
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           REASON="${RUNNER_TEMP}/reason.md"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "${BOT_NAME}"
+          git config user.email "${BOT_EMAIL}"
           if ! git merge --no-ff --no-edit -m "${MERGE_PREFIX}${TAG}" "${TAG}"; then
             {
               echo "Upstream nightly \`${TAG}\` does not merge cleanly into \`strand\`."
@@ -107,6 +119,8 @@ jobs:
             git merge --abort
             exit 1
           fi
+          # Recorded before any upstream code runs; the push job must reproduce exactly this tree.
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
 
       - name: Refuse fork-only DB migrations
         if: steps.tag.outputs.current != 'true'
@@ -129,27 +143,7 @@ jobs:
             exit 1
           fi
 
-      - name: Check the push credential
-        if: steps.tag.outputs.current != 'true'
-        env:
-          HAS_PAT: ${{ secrets.STRAND_SYNC_TOKEN != '' }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          CHANGED=$(git diff --name-only HEAD^1 HEAD -- .github/workflows/)
-          if [[ -n "${CHANGED}" && "${HAS_PAT}" != "true" ]]; then
-            {
-              echo "Upstream \`${TAG}\` changes workflow files, which \`GITHUB_TOKEN\` may not push:"
-              echo '```'
-              echo "${CHANGED}"
-              echo '```'
-              echo "Add the \`STRAND_SYNC_TOKEN\` secret (fine-grained PAT: this repository only;"
-              echo "Contents read/write + Workflows read/write) and re-run **Fork sync**."
-            } > "${RUNNER_TEMP}/reason.md"
-            exit 1
-          fi
-
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: steps.tag.outputs.current != 'true'
         with:
           node-version: 24
@@ -198,41 +192,124 @@ jobs:
         continue-on-error: true
         run: pnpm -F core test
 
-      - name: Push strand
-        id: push
-        if: steps.tag.outputs.current != 'true'
+      - name: Upload the failure reason
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fork-sync-reason
+          path: ${{ runner.temp }}/reason.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+  push:
+    name: Push strand
+    needs: check
+    if: needs.check.outputs.current != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      # Used only by the no-PAT fallback push (GITHUB_TOKEN). With STRAND_SYNC_TOKEN set it is unused.
+      contents: write
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+      sha: ${{ steps.push.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Re-do the tested merge
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.check.outputs.tag }}
+          TREE: ${{ needs.check.outputs.tree }}
         run: |
           set -euo pipefail
-          if ! git push origin HEAD:refs/heads/strand; then
+          git fetch --no-tags --quiet "${UPSTREAM_URL}" "refs/tags/${TAG}:refs/tags/${TAG}"
+          git config user.name "${BOT_NAME}"
+          git config user.email "${BOT_EMAIL}"
+          git merge --no-ff --no-edit -m "${MERGE_PREFIX}${TAG}" "${TAG}"
+          GOT=$(git rev-parse 'HEAD^{tree}')
+          if [[ -z "${TREE}" || "${GOT}" != "${TREE}" ]]; then
+            echo "The re-done merge (tree ${GOT}) differs from the tested one (tree ${TREE:-<none>}); refusing to push." \
+              > "${RUNNER_TEMP}/reason.md"
+            exit 1
+          fi
+
+      - name: Check the push credential
+        env:
+          HAS_PAT: ${{ secrets.STRAND_SYNC_TOKEN != '' }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          CHANGED=$(git diff --name-only HEAD^1 HEAD -- .github/workflows/)
+          if [[ -n "${CHANGED}" && "${HAS_PAT}" != "true" ]]; then
+            {
+              echo "Upstream \`${TAG}\` changes workflow files, which \`GITHUB_TOKEN\` may not push:"
+              echo '```'
+              echo "${CHANGED}"
+              echo '```'
+              echo "Add the \`STRAND_SYNC_TOKEN\` secret (fine-grained PAT: this repository only;"
+              echo "Contents read/write + Workflows read/write) and re-run **Fork sync**."
+            } > "${RUNNER_TEMP}/reason.md"
+            exit 1
+          fi
+
+      # The only step that sees a write credential. It is passed in the URL for this one command,
+      # never written to git config or disk, never echoed (and masked in logs by the runner).
+      - name: Push strand
+        id: push
+        env:
+          PAT: ${{ secrets.STRAND_SYNC_TOKEN }}
+          FALLBACK_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set +x
+          set -euo pipefail
+          TOKEN="${PAT:-${FALLBACK_TOKEN}}"
+          if ! git push --quiet "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/strand; then
             echo "Pushing \`strand\` failed (did it move during the run, or is the token missing a permission?). See the run log." \
               > "${RUNNER_TEMP}/reason.md"
             exit 1
           fi
+          unset TOKEN PAT FALLBACK_TOKEN
           echo "pushed=true" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "Merged ${TAG} into strand as $(git rev-parse --short=8 HEAD)." | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Close the blocked-merge issue
-        if: steps.push.outputs.pushed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          for n in $(gh issue list -R "${GITHUB_REPOSITORY}" -s open --search "in:title \"${ISSUE_TITLE}\"" --json number,title \
-                     --jq ".[] | select(.title == \"${ISSUE_TITLE}\") | .number"); do
-            gh issue close "${n}" -R "${GITHUB_REPOSITORY}" -c "Merged \`${TAG}\` cleanly; image build started in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
-          done
+      - name: Upload the failure reason
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fork-sync-reason
+          path: ${{ runner.temp }}/reason.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+  report:
+    name: Report
+    needs: [check, push]
+    if: always() && (needs.check.result == 'failure' || needs.push.result == 'failure' || needs.push.outputs.pushed == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Download the failure reason
+        if: needs.push.outputs.pushed != 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fork-sync-reason
+          path: ${{ runner.temp }}/reason
 
       - name: Open or update the blocked-merge issue
-        if: failure()
+        if: needs.push.outputs.pushed != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.check.outputs.tag }}
         run: |
-          REASON="${RUNNER_TEMP}/reason.md"
-          [[ -s "${REASON}" ]] || echo "The sync failed before it could record a reason. See the run log." > "${REASON}"
+          REASON="${RUNNER_TEMP}/reason/reason.md"
+          [[ -s "${REASON}" ]] || { mkdir -p "$(dirname "${REASON}")"; echo "The sync failed before it could record a reason. See the run log." > "${REASON}"; }
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           {
             cat "${REASON}"
@@ -255,13 +332,24 @@ jobs:
               || echo "::warning::Could not open an issue (are Issues enabled on the fork?)."
           fi
 
+      - name: Close the blocked-merge issue
+        if: needs.push.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          for n in $(gh issue list -R "${GITHUB_REPOSITORY}" -s open --search "in:title \"${ISSUE_TITLE}\"" --json number,title \
+                     --jq ".[] | select(.title == \"${ISSUE_TITLE}\") | .number"); do
+            gh issue close "${n}" -R "${GITHUB_REPOSITORY}" -c "Merged \`${TAG}\` cleanly; image build started in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+          done
+
   image:
     name: Build the image
-    needs: sync
-    if: needs.sync.outputs.pushed == 'true'
+    needs: push
+    if: needs.push.outputs.pushed == 'true'
     permissions:
       contents: read
       packages: write
     uses: ./.github/workflows/fork-image.yml
     with:
-      ref: ${{ needs.sync.outputs.sha }}
+      ref: ${{ needs.push.outputs.sha }}
