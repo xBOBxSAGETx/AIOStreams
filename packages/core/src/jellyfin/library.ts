@@ -75,6 +75,8 @@ export interface CatalogPageOptions {
   cursorKey?: string;
   /** Entry keys to skip as if the catalog never held them. */
   exclude?: ReadonlySet<string>;
+  /** Reads at most this many raw entries, below `maxCatalogItems` when lower. */
+  maxRead?: number;
 }
 
 /** A page boundary the walk passed through. */
@@ -169,7 +171,10 @@ export async function getCatalogPage(
   if (opts.genre && !supportsExtra(catalog, 'genre'))
     return { items: [], total: 0, hasMore: false, keys: [] };
 
-  const cap = appConfig.jellyfin.maxCatalogItems || Infinity;
+  const cap = Math.min(
+    appConfig.jellyfin.maxCatalogItems || Infinity,
+    opts.maxRead ?? Infinity
+  );
   const canSkip = supportsExtra(catalog, 'skip');
   const wantEnd = opts.startIndex + opts.limit;
   const out: MetaPreview[] = [];

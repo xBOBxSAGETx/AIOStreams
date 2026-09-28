@@ -172,6 +172,8 @@ const JellyfinSettingsFields = z.object({
   segments: z.boolean().optional(),
   /** Which markers to offer. Absent means all of them. */
   segmentTypes: z.array(z.enum(['Intro', 'Recap', 'Outro'])).optional(),
+  /** Honour a client's SortBy/SortOrder on libraries. Default off: catalog order. */
+  sortLibraries: z.boolean().optional(),
   /** The configuration's own user: the history its trackers sync with. */
   primary: z
     .object({
@@ -1911,6 +1913,8 @@ const StatusResponseSchema = z.object({
         resolveOnOpen: z.enum(['always', 'never', 'user']),
         /** How deep a client may page into one library. 0 = uncapped. */
         maxCatalogItems: z.number(),
+        /** Titles read to sort one library. 0 = sorting off. */
+        maxSortItems: z.number(),
         /** Catalogs shown as libraries, in the configuration's order. 0 = uncapped. */
         maxLibraries: z.number(),
         /** Extra users a configuration may add beyond its primary user. */

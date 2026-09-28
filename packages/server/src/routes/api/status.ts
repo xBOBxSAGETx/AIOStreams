@@ -50,6 +50,7 @@ const statusInfo = async (): Promise<StatusResponse> => {
         maxVersions: appConfig.jellyfin.maxVersions,
         resolveOnOpen: appConfig.jellyfin.resolveOnOpen,
         maxCatalogItems: appConfig.jellyfin.maxCatalogItems,
+        maxSortItems: appConfig.jellyfin.maxSortItems,
         maxLibraries: appConfig.jellyfin.maxLibraries,
         maxPersonas: appConfig.jellyfin.maxPersonas,
         pinSignIn: appConfig.jellyfin.pinSignIn,

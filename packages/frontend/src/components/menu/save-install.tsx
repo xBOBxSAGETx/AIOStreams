@@ -1588,6 +1588,11 @@ function Content() {
   const jellyfin = status?.settings?.jellyfin;
   const jellyfinEnabled = jellyfin?.enabled ?? false;
   const jellyfinVersionCap = jellyfin?.maxVersions ?? 10;
+  // Titles one library is sorted over: the sort cap, never past the listing cap.
+  const jellyfinSortCap =
+    jellyfin?.maxSortItems && jellyfin.maxCatalogItems
+      ? Math.min(jellyfin.maxSortItems, jellyfin.maxCatalogItems)
+      : (jellyfin?.maxSortItems ?? 0);
   const jellyfinSegmentsAvailable = jellyfin?.segments.enabled ?? false;
   const jellyfinSegmentProviders = jellyfin?.segments.providers ?? [];
   const jellyfinPmdbKey =
@@ -2985,6 +2990,40 @@ function Content() {
                 value: 'trackers',
                 label: 'Trackers',
                 content: <JellyfinTrackers />,
+              },
+              {
+                value: 'libraries',
+                label: 'Libraries',
+                content: (
+                  <div className="space-y-5">
+                    <Switch
+                      label="Sort libraries as your app asks"
+                      help={
+                        jellyfinSortCap > 0
+                          ? `Name, release date, year, rating or runtime, from your app's sort menu, over the first ${jellyfinSortCap} titles of each library.`
+                          : 'Turned off on this instance.'
+                      }
+                      moreHelp={
+                        jellyfinSortCap > 0
+                          ? "Off, every library keeps its catalog's own order, such as popular or trending, whatever your app asks for. Most apps ask for Name unless you pick something else, so turning this on makes libraries alphabetical by default. Random works either way."
+                          : undefined
+                      }
+                      side="right"
+                      disabled={jellyfinSortCap <= 0}
+                      value={
+                        jellyfinSortCap > 0 &&
+                        (userData.jellyfin?.sortLibraries ?? false)
+                      }
+                      defaultValue={false}
+                      onValueChange={(value) =>
+                        setUserData((prev) => ({
+                          ...prev,
+                          jellyfin: { ...prev.jellyfin, sortLibraries: value },
+                        }))
+                      }
+                    />
+                  </div>
+                ),
               },
               {
                 value: 'playback',
